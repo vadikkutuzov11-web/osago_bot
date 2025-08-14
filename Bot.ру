@@ -1,0 +1,125 @@
+import os
+import telebot
+from telebot import types
+
+# === Настройки через переменные окружения Railway ===
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # пример: 7263951013
+
+if not BOT_TOKEN or not ADMIN_CHAT_ID:
+    raise RuntimeError("Не заданы BOT_TOKEN или ADMIN_CHAT_ID в Variables Railway")
+
+try:
+    ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
+except:
+    pass  # Railway передает строку — TeleBot принимает и строку, и int
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
+# Память по пользователю
+users = {}  # chat_id -> dict(step, city, reg, license, vehicle, contact)
+
+# Хелперы
+def ask_city(chat_id):
+    bot.send_message(chat_id, "📍 Укажите ваш <b>город проживания</b>:")
+    users[chat_id] = {"step": "city"}
+
+def ask_reg(chat_id):
+    bot.send_message(chat_id, "📸 Отправьте <b>фото страницы прописки</b> в паспорте:")
+    users[chat_id]["step"] = "reg"
+
+def ask_license(chat_id):
+    bot.send_message(chat_id, "📸 Отправьте <b>фото водительского удостоверения</b> (обе стороны можно по очереди):")
+    users[chat_id]["step"] = "license"
+
+def ask_vehicle(chat_id):
+    bot.send_message(chat_id, "📸 Отправьте <b>фото ПТС или СТС</b> (документы на авто):")
+    users[chat_id]["step"] = "vehicle"
+
+def ask_contact(chat_id):
+    bot.send_message(chat_id, "📞 Укажите <b>номер телефона</b> (WhatsApp/Telegram) для связи:")
+    users[chat_id]["step"] = "contact"
+
+def send_application_to_admin(chat_id, from_user):
+    u = users.get(chat_id, {})
+    name = (from_user.username and f"@{from_user.username}") or from_user.first_name or "клиент"
+
+    # Текст заявки
+    text = (
+        "🚗 <b>Новая заявка на ОСАГО</b>\n\n"
+        f"Город: <b>{u.get('city','—')}</b>\n"
+        f"Контакт: <b>{u.get('contact','—')}</b>\n"
+        f"От: {name} (id: {chat_id})"
+    )
+    bot.send_message(ADMIN_CHAT_ID, text)
+
+    # Отправляем фото по очереди (альбом не обязателен — так надёжнее)
+    if u.get("reg"):
+        bot.send_photo(ADMIN_CHAT_ID, u["reg"], caption="📄 Прописка")
+    if u.get("license"):
+        bot.send_photo(ADMIN_CHAT_ID, u["license"], caption="🪪 Права")
+    if u.get("vehicle"):
+        bot.send_photo(ADMIN_CHAT_ID, u["vehicle"], caption="🚘 Документы на авто")
+
+@bot.message_handler(commands=["start", "restart", "new"])
+def cmd_start(message):
+    chat_id = message.chat.id
+    ask_city(chat_id)
+
+@bot.message_handler(commands=["cancel"])
+def cmd_cancel(message):
+    chat_id = message.chat.id
+    users.pop(chat_id, None)
+    bot.send_message(chat_id, "❌ Заявка отменена. Для начала заново — /start")
+
+@bot.message_handler(content_types=["text"])
+def on_text(message):
+    chat_id = message.chat.id
+    step = users.get(chat_id, {}).get("step")
+
+    if not step:
+        bot.send_message(chat_id, "Чтобы начать оформление — нажмите /start")
+        return
+
+    if step == "city":
+        users[chat_id]["city"] = message.text.strip()
+        ask_reg(chat_id)
+
+    elif step == "contact":
+        users[chat_id]["contact"] = message.text.strip()
+        # Отправляем админу
+        send_application_to_admin(chat_id, message.from_user)
+        bot.send_message(chat_id, "✅ Спасибо! Заявка отправлена. Мы свяжемся с вами в ближайшее время.")
+        users.pop(chat_id, None)
+
+    else:
+        bot.send_message(chat_id, "Отправьте, пожалуйста, фото (📷), как я просил на предыдущем шаге.")
+
+@bot.message_handler(content_types=["photo"])
+def on_photo(message):
+    chat_id = message.chat.id
+    step = users.get(chat_id, {}).get("step")
+
+    if not step:
+        bot.send_message(chat_id, "Чтобы начать оформление — нажмите /start")
+        return
+
+    file_id = message.photo[-1].file_id  # берём самое чёткое превью
+
+    if step == "reg":
+        users[chat_id]["reg"] = file_id
+        ask_license(chat_id)
+
+    elif step == "license":
+        users[chat_id]["license"] = file_id
+        ask_vehicle(chat_id)
+
+    elif step == "vehicle":
+        users[chat_id]["vehicle"] = file_id
+        ask_contact(chat_id)
+
+    else:
+        bot.send_message(chat_id, "Продолжим. Если что-то пошло не так, введите /start")
+
+# Запуск
+bot.polling(none_stop=True, skip_pending=True)
